@@ -1,6 +1,6 @@
 {
   "name": "opencode-gateway-provider",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenCode plugin that auto-discovers models from an OpenAI-compatible gateway via /v1/models and enriches them with models.dev metadata (name, costs, limits, capabilities)",
   "type": "module",
   "license": "MIT",

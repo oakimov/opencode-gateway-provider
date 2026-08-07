@@ -41,6 +41,7 @@ describe("buildModel", () => {
       limit: { context: 200000, output: 0 },
       provider: { npm: "@ai-sdk/openai-compatible", api: BASE_URL },
     })
+    expect(buildModel("mystery-model", undefined, BASE_URL).variants).toBeUndefined()
   })
 
   test("maps Catalog metadata to config metadata", () => {
@@ -76,6 +77,8 @@ describe("buildModel", () => {
     const result = buildModel("deepseek-v4-flash-free", hit({ name: "DeepSeek V4 Flash" }, " Free"), BASE_URL)
     expect(result.name).toBe("DeepSeek V4 Flash Free")
     expect(result.cost).toEqual({ input: 0, output: 0 })
+    expect(result.interleaved).toEqual({ field: "reasoning_content" })
+    expect(result.variants).toBeUndefined()
   })
 
   test("does not duplicate Free when Catalog name already includes it", () => {
@@ -108,5 +111,75 @@ describe("buildModel", () => {
     expect(result.cost?.context_over_200k).toMatchObject({ input: 5, output: 10 })
     expect(result.cost?.context_over_200k?.cache_read).toBeUndefined()
     expect(result.cost?.context_over_200k?.cache_write).toBeUndefined()
+  })
+
+  test("uses exactly the Catalog variants and bodies", () => {
+    const result = buildModel(
+      "claude-opus-4-6",
+      hit({
+        variants: [
+          { id: "low", headers: {}, body: { reasoningEffort: "low" } },
+          { id: "max", headers: {}, body: { reasoningEffort: "max" } },
+          { id: "xhigh", headers: {}, body: { reasoningEffort: "xhigh" } },
+        ],
+      }),
+      BASE_URL,
+    )
+    expect(result.variants).toEqual({
+      low: { reasoningEffort: "low" },
+      max: { reasoningEffort: "max" },
+      xhigh: { reasoningEffort: "xhigh" },
+    })
+  })
+
+  test("does not synthesize variants from reasoning_options", () => {
+    const result = buildModel(
+      "gpt-5-codex",
+      hit({
+        variants: [],
+        reasoning_options: [{ type: "effort", values: ["none", "low", "medium", "high", "xhigh", "max"] }],
+      } as Partial<ModelsDevModel>),
+      BASE_URL,
+    )
+    expect(result.variants).toBeUndefined()
+  })
+
+  test("skips variants when Catalog marks the model non-reasoning", () => {
+    const result = buildModel(
+      "plain-chat",
+      hit({
+        capabilities: { tools: true, input: ["text"], output: ["text"], reasoning: false } as ModelsDevModel["capabilities"],
+      }),
+      BASE_URL,
+    )
+    expect(result.reasoning).toBe(false)
+    expect(result.variants).toBeUndefined()
+  })
+
+  test("copies explicit Catalog variants even when capability flags disagree", () => {
+    const result = buildModel(
+      "catalog-authoritative",
+      hit({
+        capabilities: { tools: true, input: ["text"], output: ["text"], reasoning: false } as ModelsDevModel["capabilities"],
+        variants: [{ id: "high", headers: {}, body: { reasoningEffort: "high" } }],
+      }),
+      BASE_URL,
+    )
+    expect(result.variants).toEqual({ high: { reasoningEffort: "high" } })
+  })
+
+  test("forwards Catalog request headers/options when present", () => {
+    const result = buildModel(
+      "with-request",
+      hit({
+        request: {
+          headers: { "X-Test": "1" },
+          body: { store: false },
+        },
+      }),
+      BASE_URL,
+    )
+    expect(result.headers).toEqual({ "X-Test": "1" })
+    expect(result.options).toEqual({ store: false })
   })
 })

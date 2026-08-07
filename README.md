@@ -3,8 +3,9 @@
 An [opencode](https://opencode.ai) plugin that auto-discovers models from a
 custom OpenAI-compatible gateway and enriches them with models.dev metadata
 (display name, costs, context/output limits, capabilities, modalities, release
-date) — so a gateway in `opencode.json` behaves like a first-class provider
-without hand-listing every model.
+date, and openai-compatible reasoning `variants`) — so a gateway in
+`opencode.json` behaves like a first-class provider without hand-listing every
+model.
 
 ## How it works
 

@@ -2,6 +2,8 @@
 
 import type { ModelsDevHit, ModelsDevModel } from "./modelsdev.js"
 
+export type ConfigVariant = Record<string, unknown>
+
 export type ConfigModel = {
   id?: string
   name: string
@@ -11,6 +13,7 @@ export type ConfigModel = {
   reasoning?: boolean
   temperature?: boolean
   tool_call?: boolean
+  interleaved?: true | { field: "reasoning" | "reasoning_content" | "reasoning_details" }
   cost?: {
     input: number
     output: number
@@ -27,6 +30,10 @@ export type ConfigModel = {
   modalities?: { input?: string[]; output?: string[] }
   status?: "alpha" | "beta" | "deprecated" | "active"
   provider?: { npm?: string; api?: string }
+  options?: Record<string, unknown>
+  headers?: Record<string, string>
+  /** Variant → provider option overrides copied verbatim from the Catalog. */
+  variants?: Record<string, ConfigVariant>
 }
 
 const DEFAULT_NPM = "@ai-sdk/openai-compatible"
@@ -36,6 +43,10 @@ const DEFAULTS = {
   temperature: true,
   tool_call: true,
   context: 200_000,
+}
+
+type CatalogExtras = {
+  interleaved?: ConfigModel["interleaved"]
 }
 
 function releaseDate(timestamp: number) {
@@ -65,6 +76,31 @@ function costs(row: ModelsDevModel, free: boolean): ConfigModel["cost"] {
   }
 }
 
+function capabilityFlag(capabilities: ModelsDevModel["capabilities"], key: string): boolean | undefined {
+  const value = (capabilities as Record<string, unknown>)[key]
+  return typeof value === "boolean" ? value : undefined
+}
+
+function catalogVariantEntries(row: ModelsDevModel): Record<string, ConfigVariant> {
+  return Object.fromEntries(row.variants.map((variant) => [variant.id, { ...variant.body }]))
+}
+
+function interleavedFor(modelID: string, row: ModelsDevModel | undefined): ConfigModel["interleaved"] {
+  const fromCatalog = (row as (ModelsDevModel & CatalogExtras) | undefined)?.interleaved
+  if (fromCatalog === true || (fromCatalog && typeof fromCatalog === "object" && "field" in fromCatalog)) {
+    return fromCatalog
+  }
+  // DeepSeek reasoners expose unsigned reasoning via reasoning_content on
+  // OpenAI-compatible gateways; hosts also special-case this.
+  if (modelID.toLowerCase().includes("deepseek")) return { field: "reasoning_content" }
+  return undefined
+}
+
+function nonEmptyRecord(value: Record<string, unknown> | undefined) {
+  if (!value) return undefined
+  return Object.keys(value).length > 0 ? value : undefined
+}
+
 export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: string): ConfigModel {
   const entry: ConfigModel = {
     name: id,
@@ -76,7 +112,12 @@ export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: s
     limit: { context: DEFAULTS.context, output: 0 },
     provider: { npm: DEFAULT_NPM, api: baseURL },
   }
-  if (!hit) return entry
+
+  if (!hit) {
+    const interleaved = interleavedFor(id, undefined)
+    if (interleaved) entry.interleaved = interleaved
+    return entry
+  }
 
   const { row, tier } = hit
   entry.name = row.name + (tier && !row.name.toLowerCase().endsWith(tier.toLowerCase()) ? tier : "")
@@ -84,6 +125,8 @@ export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: s
   entry.release_date = releaseDate(row.time.released)
   entry.tool_call = row.capabilities.tools
   entry.attachment = row.capabilities.input.some((item) => item === "image" || item === "pdf")
+  entry.reasoning = capabilityFlag(row.capabilities, "reasoning") ?? DEFAULTS.reasoning
+  entry.temperature = capabilityFlag(row.capabilities, "temperature") ?? DEFAULTS.temperature
   entry.modalities = {
     input: [...row.capabilities.input],
     output: [...row.capabilities.output],
@@ -91,5 +134,18 @@ export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: s
   entry.limit = { ...row.limit }
   entry.cost = costs(row, Boolean(tier))
   entry.status = row.status
+
+  const headers = nonEmptyRecord(row.request?.headers) as Record<string, string> | undefined
+  if (headers) entry.headers = headers
+  const options = nonEmptyRecord(row.request?.body)
+  if (options) entry.options = options
+
+  const interleaved = interleavedFor(id, row)
+  if (interleaved) entry.interleaved = interleaved
+
+  if (row.variants.length > 0) {
+    entry.variants = catalogVariantEntries(row)
+  }
+
   return entry
 }

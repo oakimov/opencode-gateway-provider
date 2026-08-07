@@ -50,6 +50,18 @@ export type GatewayPluginOptions = {
 
 type ProviderOptions = { baseURL?: unknown; apiKeyEnv?: unknown; autoDiscover?: unknown; [key: string]: unknown }
 
+type ProviderConfig = {
+  npm?: string
+  env?: string[]
+  models?: Record<string, ConfigModel>
+  options?: ProviderOptions
+  [key: string]: unknown
+}
+
+type GatewayConfig = Config & {
+  provider?: Record<string, ProviderConfig | undefined>
+}
+
 function optionString(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined
 }
@@ -67,7 +79,7 @@ async function discoverModels(input: PluginInput, baseURL: string, apiKey: strin
 
 function isEligible(
   providerID: string,
-  provider: NonNullable<Config["provider"]>[string],
+  provider: ProviderConfig,
   options: ProviderOptions | undefined,
   scoped: string[] | undefined,
 ): boolean {
@@ -81,7 +93,7 @@ function isEligible(
   return !npm || npm === OPENAI_COMPATIBLE_NPM
 }
 
-function resolveApiKey(provider: NonNullable<Config["provider"]>[string], options: ProviderOptions | undefined) {
+function resolveApiKey(provider: ProviderConfig, options: ProviderOptions | undefined) {
   const explicit = optionString(options?.apiKeyEnv)
   if (explicit) {
     const value = process.env[explicit]
@@ -99,10 +111,12 @@ export async function GatewayProvider(input: PluginInput, options?: GatewayPlugi
   const scoped = options?.providers?.length ? [...options.providers] : undefined
   return {
     async config(cfg: Config) {
-      cfg.provider ??= {}
-      for (const [providerID, provider] of Object.entries(cfg.provider)) {
+      const config = cfg as GatewayConfig
+      config.provider ??= {}
+      for (const [providerID, value] of Object.entries(config.provider)) {
+        const provider = value as ProviderConfig | undefined
         if (!provider) continue
-        const opts = provider.options as ProviderOptions | undefined
+        const opts = provider.options
         const baseURL = optionString(opts?.baseURL)
         const eligible = Boolean(baseURL) && isEligible(providerID, provider, opts, scoped)
         // Resolve the key while apiKeyEnv is still on opts (consumed below).
@@ -131,7 +145,7 @@ export async function GatewayProvider(input: PluginInput, options?: GatewayPlugi
         try {
           const models = await discoverModels(input, baseURL, credential.value)
           if (Object.keys(models).length > 0) {
-            provider.models = models as typeof provider.models
+            provider.models = models
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
