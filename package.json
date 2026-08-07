@@ -1,0 +1,36 @@
+{
+  "name": "opencode-gateway-provider",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that auto-discovers models from an OpenAI-compatible gateway via /v1/models and enriches them with models.dev metadata (name, costs, limits, capabilities)",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.17.0",
+    "@opencode-ai/sdk": "^1.18.0"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.15",
+    "@opencode-ai/sdk": "1.18.15",
+    "@tsconfig/node22": "^22.0.5",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
+  }
+}
