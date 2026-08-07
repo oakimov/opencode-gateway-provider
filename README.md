@@ -38,15 +38,47 @@ overwritten; discovery only fills the gap.
 
 ## Setup
 
-```sh
-bun install && bun run build
-```
+### From npm
 
-`opencode.json` (project or global):
+Add the package to your opencode config. OpenCode installs npm plugins with
+Bun at startup (cached under `~/.cache/opencode/node_modules/`):
 
 ```json
 {
-  "plugin": ["/path/to/opencode-gateway-provider/dist/index.js"],
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-gateway-provider"],
+  "provider": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "https://gateway.example.com/v1" },
+      "env": ["LITELLM_API_KEY"]
+    }
+  }
+}
+```
+
+Pin a version if you want: `"opencode-gateway-provider@0.1.0"`.
+
+You can also install it yourself first:
+
+```sh
+npm install opencode-gateway-provider
+# or: bun add opencode-gateway-provider
+```
+
+### From a local clone
+
+```sh
+git clone https://github.com/oakimov/opencode-gateway-provider.git
+cd opencode-gateway-provider
+bun install && bun run build
+```
+
+Point opencode at the built entry with an absolute `file://` URL:
+
+```json
+{
+  "plugin": ["file:///absolute/path/to/opencode-gateway-provider/dist/index.js"],
   "provider": {
     "litellm": {
       "npm": "@ai-sdk/openai-compatible",
