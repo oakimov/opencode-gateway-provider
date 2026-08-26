@@ -1,44 +1,75 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { GatewayProvider, GATEWAY_PROVIDER_ID } from "./plugin.js"
 import type { PluginInput } from "@opencode-ai/plugin"
-import type { ModelV2Info } from "@opencode-ai/sdk/v2/types"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
-const CATALOG: ModelV2Info[] = [
-  {
-    id: "deepseek-v4-flash",
-    providerID: "opencode",
-    name: "DeepSeek V4 Flash",
-    family: "deepseek",
-    api: { id: "deepseek-v4-flash", type: "native", settings: {} },
-    capabilities: { tools: true, input: ["text"], output: ["text"] },
-    request: { headers: {}, body: {} },
-    variants: [],
-    time: { released: Date.parse("2026-01-01") },
-    cost: [{ input: 0.2, output: 0.6, cache: { read: 0.05, write: 0 } }],
-    status: "active",
-    enabled: true,
-    limit: { context: 128_000, output: 8192 },
+const CATALOG = {
+  deepseek: {
+    id: "deepseek",
+    npm: "@ai-sdk/openai-compatible",
+    models: {
+      "deepseek-v4-flash": {
+        id: "deepseek-v4-flash",
+        name: "DeepSeek V4 Flash",
+        family: "deepseek",
+        reasoning: true,
+        reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }],
+        tool_call: true,
+        temperature: false,
+        release_date: "2026-01-01",
+        modalities: { input: ["text"], output: ["text"] },
+        limit: { context: 128_000, output: 8192 },
+        cost: { input: 0.2, output: 0.6, cache_read: 0.05 },
+      },
+    },
   },
-]
+}
 
-function pluginInput(onCatalogRequest?: (options: { url?: string }) => void): PluginInput {
+let catalogDirectory = ""
+let catalogFile = ""
+let originalCatalogPath: string | undefined
+let originalOverridePath: string | undefined
+
+beforeAll(async () => {
+  catalogDirectory = await mkdtemp(path.join(os.tmpdir(), "gateway-plugin-models-"))
+  catalogFile = path.join(catalogDirectory, "models.json")
+  await writeFile(catalogFile, JSON.stringify(CATALOG))
+  originalCatalogPath = process.env.OPENCODE_MODELS_PATH
+  originalOverridePath = process.env.GATEWAY_MODEL_OVERRIDES
+  process.env.OPENCODE_MODELS_PATH = catalogFile
+  process.env.GATEWAY_MODEL_OVERRIDES = path.join(catalogDirectory, "missing-overrides.json")
+})
+
+afterAll(async () => {
+  if (originalCatalogPath === undefined) delete process.env.OPENCODE_MODELS_PATH
+  else process.env.OPENCODE_MODELS_PATH = originalCatalogPath
+  if (originalOverridePath === undefined) delete process.env.GATEWAY_MODEL_OVERRIDES
+  else process.env.GATEWAY_MODEL_OVERRIDES = originalOverridePath
+  await rm(catalogDirectory, { recursive: true, force: true })
+})
+
+function pluginInput(): PluginInput {
   return {
     directory: "/tmp/project",
     client: {
       _client: {
-        get: async (options: { url?: string }) => {
-          onCatalogRequest?.(options)
-          return { data: { location: { directory: "/tmp/project" }, data: CATALOG } }
+        getConfig: () => ({
+          headers: { "x-opencode-directory": "/tmp/project" },
+        }),
+        get: () => {
+          throw new Error("catalog discovery must not call a host route")
         },
       },
+      app: { log: async () => undefined },
     },
   } as unknown as PluginInput
 }
 
 describe("config hook", () => {
-  test("fills /v1/models slugs using opencode's internal model API", async () => {
+  test("fills /v1/models slugs using the host's cached models.dev catalog", async () => {
     const original = globalThis.fetch
-    let catalogURL: string | undefined
     globalThis.fetch = (async (request: string | URL | Request) => {
       expect(String(request)).toBe("https://gateway.example.com/v1/models")
       return new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }, { id: "mystery-model" }] }), {
@@ -49,22 +80,31 @@ describe("config hook", () => {
 
     try {
       process.env.GATEWAY_API_KEY = "sk-test"
-      const hooks = await GatewayProvider(pluginInput((options) => (catalogURL = options.url)))
-      const cfg = {
+      const hooks = await GatewayProvider(pluginInput())
+      const cfg: any = {
         provider: {
           [GATEWAY_PROVIDER_ID]: { options: { baseURL: "https://gateway.example.com/v1" } },
         },
       }
       await hooks.config?.(cfg as never)
 
-      expect(catalogURL).toBe("/api/model")
       const models = cfg.provider[GATEWAY_PROVIDER_ID].models as Record<string, Record<string, unknown>>
       expect(Object.keys(models).sort()).toEqual(["deepseek-v4-flash", "mystery-model"])
       expect(models["deepseek-v4-flash"]).toMatchObject({
         name: "DeepSeek V4 Flash",
         family: "deepseek",
+        reasoning: true,
         cost: { input: 0.2, output: 0.6, cache_read: 0.05 },
         limit: { context: 128000, output: 8192 },
+        variants: {
+          none: { disabled: true },
+          low: { disabled: true },
+          Low: { reasoningEffort: "low" },
+          high: { disabled: true },
+          High: { reasoningEffort: "high" },
+          max: { disabled: true },
+          Max: { reasoningEffort: "max" },
+        },
       })
       expect(models["mystery-model"]).toMatchObject({
         name: "mystery-model",
@@ -81,7 +121,7 @@ describe("config hook", () => {
   test("keeps explicitly declared models untouched", async () => {
     const hooks = await GatewayProvider(pluginInput())
     const declared = { "my-model": { name: "My Model", cost: { input: 1, output: 2 } } }
-    const cfg = {
+    const cfg: any = {
       provider: {
         [GATEWAY_PROVIDER_ID]: {
           options: { baseURL: "https://gateway.example.com/v1" },
@@ -95,21 +135,21 @@ describe("config hook", () => {
 
   test("no-ops when baseURL is missing", async () => {
     const hooks = await GatewayProvider(pluginInput())
-    const cfg = { provider: { [GATEWAY_PROVIDER_ID]: { options: {} } } }
+    const cfg: any = { provider: { [GATEWAY_PROVIDER_ID]: { options: {} } } }
     await hooks.config?.(cfg as never)
     expect(cfg.provider[GATEWAY_PROVIDER_ID].models).toBeUndefined()
   })
 
   test("discovers a generic provider id and uses its env key", async () => {
     const original = globalThis.fetch
-    globalThis.fetch = (async (_request: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = (async (request: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer litellm-key")
       return new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }), { status: 200 })
     }) as typeof fetch
     try {
       process.env.LITELLM_API_KEY = "litellm-key"
       const hooks = await GatewayProvider(pluginInput())
-      const cfg = {
+      const cfg: any = {
         provider: {
           litellm: {
             options: { baseURL: "https://gateway.example.com/v1" },
@@ -128,7 +168,7 @@ describe("config hook", () => {
 
   test("options.apiKeyEnv takes precedence over provider env", async () => {
     const original = globalThis.fetch
-    globalThis.fetch = (async (_request: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = (async (request: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer explicit-key")
       return new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }), { status: 200 })
     }) as typeof fetch
@@ -136,7 +176,7 @@ describe("config hook", () => {
       process.env.EXPLICIT_GATEWAY_KEY = "explicit-key"
       process.env.LITELLM_API_KEY = "provider-key"
       const hooks = await GatewayProvider(pluginInput())
-      const cfg = {
+      const cfg: any = {
         provider: {
           litellm: {
             npm: "@ai-sdk/openai-compatible",
@@ -159,7 +199,7 @@ describe("config hook", () => {
 
   test("an unset apiKeyEnv falls back to provider env", async () => {
     const original = globalThis.fetch
-    globalThis.fetch = (async (_request: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = (async (request: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer provider-key")
       return new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }), { status: 200 })
     }) as typeof fetch
@@ -167,7 +207,7 @@ describe("config hook", () => {
       delete process.env.MISSING_GATEWAY_KEY
       process.env.LITELLM_API_KEY = "provider-key"
       const hooks = await GatewayProvider(pluginInput())
-      const cfg = {
+      const cfg: any = {
         provider: {
           litellm: {
             npm: "@ai-sdk/openai-compatible",
@@ -186,7 +226,7 @@ describe("config hook", () => {
 
   test("autoDiscover false wins over plugin provider scoping", async () => {
     const hooks = await GatewayProvider(pluginInput(), { providers: ["litellm"] })
-    const cfg = {
+    const cfg: any = {
       provider: {
         litellm: {
           npm: "@ai-sdk/openai-compatible",
@@ -203,7 +243,7 @@ describe("config hook", () => {
     process.env.LITELLM_API_KEY = "litellm-key"
     try {
       const hooks = await GatewayProvider(pluginInput())
-      const cfg = {
+      const cfg: any = {
         provider: {
           litellm: {
             npm: "@ai-sdk/openai-compatible",
@@ -224,7 +264,7 @@ describe("config hook", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant"
     try {
       const hooks = await GatewayProvider(pluginInput())
-      const cfg = {
+      const cfg: any = {
         provider: {
           anthropic: {
             npm: "@ai-sdk/anthropic",
@@ -242,21 +282,27 @@ describe("config hook", () => {
     }
   })
 
-  test("logs internal Catalog failures without breaking config loading", async () => {
+  test("override provider steers catalog lookup and variant translation", async () => {
     const original = globalThis.fetch
-    let logMessage = ""
+    const overrideFile = path.join(catalogDirectory, "gateway-model-overrides.json")
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }), { status: 200 })) as typeof fetch
-    const input = {
-      directory: "/tmp/project",
-      client: {
-        _client: { get: async () => { throw new Error("Catalog unavailable") } },
-        app: { log: async ({ body }: { body: { message: string } }) => { logMessage = body.message } },
-      },
-    } as unknown as PluginInput
+      new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }), { status: 200 })) as unknown as typeof fetch
+    await writeFile(
+      overrideFile,
+      JSON.stringify({
+        models: {
+          "deepseek-v4-flash": {
+            provider: "deepseek",
+            variants: ["low", "xhigh"],
+          },
+        },
+      }),
+    )
+    const previousOverride = process.env.GATEWAY_MODEL_OVERRIDES
+    process.env.GATEWAY_MODEL_OVERRIDES = overrideFile
     try {
-      const hooks = await GatewayProvider(input)
-      const cfg = {
+      const hooks = await GatewayProvider(pluginInput())
+      const cfg: any = {
         provider: {
           litellm: {
             npm: "@ai-sdk/openai-compatible",
@@ -265,9 +311,96 @@ describe("config hook", () => {
         },
       }
       await hooks.config?.(cfg as never)
-      expect(cfg.provider.litellm.models).toBeUndefined()
-      expect(logMessage).toContain("Failed to discover models for provider litellm: Catalog unavailable")
+      expect(cfg.provider.litellm.models?.["deepseek-v4-flash"]).toMatchObject({
+        name: "DeepSeek V4 Flash",
+        variants: {
+          Low: { reasoningEffort: "low" },
+          "Extra High": { reasoningEffort: "xhigh" },
+        },
+      })
+      expect(cfg.provider.litellm.models?.["deepseek-v4-flash"]?.variants?.xhigh).toEqual({ disabled: true })
     } finally {
+      if (previousOverride === undefined) delete process.env.GATEWAY_MODEL_OVERRIDES
+      else process.env.GATEWAY_MODEL_OVERRIDES = previousOverride
+      await rm(overrideFile, { force: true })
+      globalThis.fetch = original
+    }
+  })
+
+  test("override pricing does not apply to -free slugs", async () => {
+    const original = globalThis.fetch
+    const overrideFile = path.join(catalogDirectory, "gateway-model-overrides.json")
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash-free" }] }), { status: 200 })) as unknown as typeof fetch
+    await writeFile(
+      overrideFile,
+      JSON.stringify({
+        models: {
+          "deepseek-v4-flash": { pricing: { input: 9, output: 9 } },
+        },
+      }),
+    )
+    const previousOverride = process.env.GATEWAY_MODEL_OVERRIDES
+    process.env.GATEWAY_MODEL_OVERRIDES = overrideFile
+    try {
+      const hooks = await GatewayProvider(pluginInput())
+      const cfg: any = {
+        provider: {
+          litellm: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "https://gateway.example.com/v1" },
+          },
+        },
+      }
+      await hooks.config?.(cfg as never)
+      expect(cfg.provider.litellm.models?.["deepseek-v4-flash-free"]).toMatchObject({
+        cost: { input: 0, output: 0 },
+      })
+    } finally {
+      if (previousOverride === undefined) delete process.env.GATEWAY_MODEL_OVERRIDES
+      else process.env.GATEWAY_MODEL_OVERRIDES = previousOverride
+      await rm(overrideFile, { force: true })
+      globalThis.fetch = original
+    }
+  })
+
+  test("logs catalog failures and still emits discovered models with defaults", async () => {
+    const original = globalThis.fetch
+    const configuredCatalog = process.env.OPENCODE_MODELS_PATH
+    let logMessage = ""
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }), { status: 200 })) as unknown as typeof fetch
+    process.env.OPENCODE_MODELS_PATH = path.join(catalogDirectory, "missing.json")
+    const input = {
+      directory: "/tmp/project",
+      client: {
+        _client: {
+          getConfig: () => ({ headers: { "x-opencode-directory": "/tmp/project" } }),
+        },
+        app: { log: async ({ body }: { body: { message: string } }) => { logMessage = body.message } },
+      },
+    } as unknown as PluginInput
+    try {
+      const hooks = await GatewayProvider(input)
+      const cfg: any = {
+        provider: {
+          litellm: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { baseURL: "https://gateway.example.com/v1" },
+          },
+        },
+      }
+      await hooks.config?.(cfg as never)
+      expect(cfg.provider.litellm.models?.["deepseek-v4-flash"]).toMatchObject({
+        name: "deepseek-v4-flash",
+        reasoning: true,
+        tool_call: true,
+      })
+      expect(logMessage).toContain("Failed to read the host model catalog; using defaults:")
+      expect(logMessage).toContain("missing.json")
+    } finally {
+      if (configuredCatalog === undefined) delete process.env.OPENCODE_MODELS_PATH
+      else process.env.OPENCODE_MODELS_PATH = configuredCatalog
       globalThis.fetch = original
     }
   })

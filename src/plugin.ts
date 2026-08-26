@@ -10,7 +10,7 @@
  * A provider is eligible for discovery when its block in opencode.json has a
  * `options.baseURL` and no explicitly declared `models`. To avoid hijacking
  * providers whose models come from the models.dev catalog, discovery applies
- * only to OpenAI-compatible npm packages (`@ai-sdk/openai-compatible` or an
+ * only to OpenAI-compatible npm packages (`@ai-sdk/openai`, `@ai-sdk/openai-compatible`, or an
  * unset `npm`), unless explicitly forced:
  *
  *   "provider": {
@@ -36,12 +36,19 @@
 import type { Config, Hooks, PluginInput } from "@opencode-ai/plugin"
 import { listModelIds } from "./gateway.js"
 import { buildModel, type ConfigModel } from "./model.js"
-import { buildIndex, getCatalog, lookupInIndex } from "./modelsdev.js"
+import {
+  buildIndex,
+  getCatalog,
+  lookupInIndex,
+} from "./modelsdev.js"
+import { applyModelOverride, getOverrides, overrideFor } from "./overrides.js"
 
 /** @deprecated Kept for backwards compatibility; discovery now applies to any eligible provider id. */
 export const GATEWAY_PROVIDER_ID = "gateway"
 const DEFAULT_API_KEY_ENV = "GATEWAY_API_KEY"
+const OPENAI_NPM = "@ai-sdk/openai"
 const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible"
+const OPENAI_ELIGIBLE_NPMS = new Set([OPENAI_NPM, OPENAI_COMPATIBLE_NPM])
 
 export type GatewayPluginOptions = {
   /** When set, only these provider ids are considered for discovery. */
@@ -66,13 +73,36 @@ function optionString(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined
 }
 
-async function discoverModels(input: PluginInput, baseURL: string, apiKey: string | undefined): Promise<Record<string, ConfigModel>> {
+async function logError(input: PluginInput, message: string) {
+  await input.client.app
+    .log({
+      body: {
+        service: "opencode-gateway-provider",
+        level: "error",
+        message,
+      },
+    })
+    .catch(() => undefined)
+}
+
+async function discoverModels(input: PluginInput, baseURL: string, apiKey: string | undefined, providerNpm?: string): Promise<Record<string, ConfigModel>> {
   const ids = await listModelIds(baseURL, apiKey)
-  const catalog = await getCatalog(input)
+  const catalog = await getCatalog(input).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    await logError(input, `Failed to read the host model catalog; using defaults: ${message}`)
+    return []
+  })
   const index = buildIndex(catalog)
+  const overrides = await getOverrides(input).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    await logError(input, message)
+    return {}
+  })
   const models: Record<string, ConfigModel> = {}
   for (const id of ids) {
-    models[id] = buildModel(id, lookupInIndex(index, id), baseURL)
+    const override = overrideFor(overrides, id)
+    const hit = lookupInIndex(index, id, override?.provider)
+    models[id] = applyModelOverride(buildModel(id, hit, baseURL, providerNpm), override, id)
   }
   return models
 }
@@ -90,7 +120,7 @@ function isEligible(
   if (options?.autoDiscover === false) return false
   if (options?.autoDiscover === true) return true
   const npm = optionString(provider.npm)
-  return !npm || npm === OPENAI_COMPATIBLE_NPM
+  return !npm || OPENAI_ELIGIBLE_NPMS.has(npm)
 }
 
 function resolveApiKey(provider: ProviderConfig, options: ProviderOptions | undefined) {
@@ -143,21 +173,13 @@ export async function GatewayProvider(input: PluginInput, options?: GatewayPlugi
 
         provider.npm ??= OPENAI_COMPATIBLE_NPM
         try {
-          const models = await discoverModels(input, baseURL, credential.value)
+          const models = await discoverModels(input, baseURL, credential.value, provider.npm)
           if (Object.keys(models).length > 0) {
             provider.models = models
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          await input.client.app
-            .log({
-              body: {
-                service: "opencode-gateway-provider",
-                level: "error",
-                message: `Failed to discover models for provider ${providerID}: ${message}`,
-              },
-            })
-            .catch(() => undefined)
+          await logError(input, `Failed to discover models for provider ${providerID}: ${message}`)
         }
       }
     },

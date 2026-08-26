@@ -32,11 +32,13 @@ export type ConfigModel = {
   provider?: { npm?: string; api?: string }
   options?: Record<string, unknown>
   headers?: Record<string, string>
-  /** Variant → provider option overrides copied verbatim from the Catalog. */
   variants?: Record<string, ConfigVariant>
 }
 
-const DEFAULT_NPM = "@ai-sdk/openai-compatible"
+export const OPENAI_NPM = "@ai-sdk/openai"
+export const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible"
+export const OPENAI_ELIGIBLE_NPMS = new Set([OPENAI_NPM, OPENAI_COMPATIBLE_NPM])
+const DEFAULT_NPM = OPENAI_COMPATIBLE_NPM
 const DEFAULTS = {
   attachment: true,
   reasoning: true,
@@ -45,9 +47,7 @@ const DEFAULTS = {
   context: 200_000,
 }
 
-type CatalogExtras = {
-  interleaved?: ConfigModel["interleaved"]
-}
+type CatalogExtras = { interleaved?: ConfigModel["interleaved"] }
 
 function releaseDate(timestamp: number) {
   if (!timestamp) return undefined
@@ -81,27 +81,64 @@ function capabilityFlag(capabilities: ModelsDevModel["capabilities"], key: strin
   return typeof value === "boolean" ? value : undefined
 }
 
-function catalogVariantEntries(row: ModelsDevModel): Record<string, ConfigVariant> {
-  return Object.fromEntries(row.variants.map((variant) => [variant.id, { ...variant.body }]))
+const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+
+const EFFORT_LABELS: Record<string, string> = {
+  none: "None",
+  default: "Default",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
 }
 
-function interleavedFor(modelID: string, row: ModelsDevModel | undefined): ConfigModel["interleaved"] {
+function isEffortGreaterThanLow(effort: string): boolean {
+  const rank = (EFFORT_ORDER as readonly string[]).indexOf(effort.toLowerCase())
+  const lowRank = (EFFORT_ORDER as readonly string[]).indexOf("low")
+  return rank !== -1 && rank > lowRank
+}
+
+function variantLabel(effort: string): string {
+  return EFFORT_LABELS[effort.toLowerCase()] ?? effort
+}
+
+export function buildVariantEntries(ids: string[], providerNpm?: string): Record<string, ConfigVariant> {
+  const isOpenAI = providerNpm === OPENAI_NPM
+  const entries: Record<string, ConfigVariant> = {}
+  for (const raw of Object.keys(EFFORT_LABELS)) entries[raw] = { disabled: true }
+  for (const rawId of ids) {
+    const id = rawId.toLowerCase() === "null" ? "none" : rawId
+    const base: ConfigVariant = { reasoningEffort: id }
+    const displayKey = variantLabel(id)
+    if (isOpenAI && isEffortGreaterThanLow(id)) {
+      base.reasoningSummary = "auto"
+      base.include = ["reasoning.encrypted_content"]
+    }
+    entries[displayKey] = base
+  }
+  return entries
+}
+
+function catalogVariantEntries(row: ModelsDevModel, providerNpm?: string): Record<string, ConfigVariant> {
+  if (row.variants.length === 0) return {}
+  return buildVariantEntries(
+    row.variants.map((variant) => variant.id),
+    providerNpm,
+  )
+}
+
+function interleavedFor(row: ModelsDevModel | undefined): ConfigModel["interleaved"] {
   const fromCatalog = (row as (ModelsDevModel & CatalogExtras) | undefined)?.interleaved
   if (fromCatalog === true || (fromCatalog && typeof fromCatalog === "object" && "field" in fromCatalog)) {
     return fromCatalog
   }
-  // DeepSeek reasoners expose unsigned reasoning via reasoning_content on
-  // OpenAI-compatible gateways; hosts also special-case this.
-  if (modelID.toLowerCase().includes("deepseek")) return { field: "reasoning_content" }
   return undefined
 }
 
-function nonEmptyRecord(value: Record<string, unknown> | undefined) {
-  if (!value) return undefined
-  return Object.keys(value).length > 0 ? value : undefined
-}
-
-export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: string): ConfigModel {
+export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: string, providerNpm?: string): ConfigModel {
+  const npm = providerNpm && OPENAI_ELIGIBLE_NPMS.has(providerNpm) ? providerNpm : DEFAULT_NPM
   const entry: ConfigModel = {
     name: id,
     attachment: DEFAULTS.attachment,
@@ -110,12 +147,10 @@ export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: s
     tool_call: DEFAULTS.tool_call,
     cost: { input: 0, output: 0 },
     limit: { context: DEFAULTS.context, output: 0 },
-    provider: { npm: DEFAULT_NPM, api: baseURL },
+    provider: { npm, api: baseURL },
   }
 
   if (!hit) {
-    const interleaved = interleavedFor(id, undefined)
-    if (interleaved) entry.interleaved = interleaved
     return entry
   }
 
@@ -133,19 +168,13 @@ export function buildModel(id: string, hit: ModelsDevHit | undefined, baseURL: s
   }
   entry.limit = { ...row.limit }
   entry.cost = costs(row, Boolean(tier))
-  entry.status = row.status
+  if (row.status === "alpha" || row.status === "beta" || row.status === "deprecated") entry.status = row.status
 
-  const headers = nonEmptyRecord(row.request?.headers) as Record<string, string> | undefined
-  if (headers) entry.headers = headers
-  const options = nonEmptyRecord(row.request?.body)
-  if (options) entry.options = options
-
-  const interleaved = interleavedFor(id, row)
+  const interleaved = interleavedFor(row)
   if (interleaved) entry.interleaved = interleaved
 
-  if (row.variants.length > 0) {
-    entry.variants = catalogVariantEntries(row)
-  }
+  const variants = catalogVariantEntries(row, npm)
+  if (Object.keys(variants).length > 0) entry.variants = variants
 
   return entry
 }

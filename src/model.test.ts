@@ -4,7 +4,15 @@ import type { ModelsDevHit, ModelsDevModel } from "./modelsdev.js"
 
 const BASE_URL = "https://gateway.example.com/v1"
 
-function hit(overrides: Partial<ModelsDevModel> = {}, tier = ""): ModelsDevHit {
+type CostOverride = {
+  input: number
+  output: number
+  cache?: { read?: number; write?: number }
+  tier?: { type: "context"; size: number }
+}
+
+function hit(overrides: Omit<Partial<ModelsDevModel>, "cost"> & { cost?: CostOverride[] } = {}, tier = ""): ModelsDevHit {
+  const { cost, ...rest } = overrides
   return {
     tier,
     row: {
@@ -17,14 +25,14 @@ function hit(overrides: Partial<ModelsDevModel> = {}, tier = ""): ModelsDevHit {
       request: { headers: {}, body: {} },
       variants: [],
       time: { released: Date.parse("2024-06-20") },
-      cost: [
-        { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
-        { tier: { type: "context", size: 200_000 }, input: 6, output: 22.5, cache: { read: 0.6, write: 7.5 } },
-      ],
       status: "active",
       enabled: true,
       limit: { context: 200_000, output: 8192 },
-      ...overrides,
+      ...rest,
+      cost: (cost ?? [
+        { input: 3, output: 15, cache: { read: 0.3, write: 3.75 } },
+        { tier: { type: "context", size: 200_000 }, input: 6, output: 22.5, cache: { read: 0.6, write: 7.5 } },
+      ]) as ModelsDevModel["cost"],
     },
   }
 }
@@ -77,7 +85,7 @@ describe("buildModel", () => {
     const result = buildModel("deepseek-v4-flash-free", hit({ name: "DeepSeek V4 Flash" }, " Free"), BASE_URL)
     expect(result.name).toBe("DeepSeek V4 Flash Free")
     expect(result.cost).toEqual({ input: 0, output: 0 })
-    expect(result.interleaved).toEqual({ field: "reasoning_content" })
+    expect(result.interleaved).toBeUndefined()
     expect(result.variants).toBeUndefined()
   })
 
@@ -113,7 +121,7 @@ describe("buildModel", () => {
     expect(result.cost?.context_over_200k?.cache_write).toBeUndefined()
   })
 
-  test("uses exactly the Catalog variants and bodies", () => {
+  test("emits translated labels without raw effort keys", () => {
     const result = buildModel(
       "claude-opus-4-6",
       hit({
@@ -125,19 +133,73 @@ describe("buildModel", () => {
       }),
       BASE_URL,
     )
-    expect(result.variants).toEqual({
-      low: { reasoningEffort: "low" },
-      max: { reasoningEffort: "max" },
-      xhigh: { reasoningEffort: "xhigh" },
+    expect(result.variants).toMatchObject({
+      none: { disabled: true },
+      default: { disabled: true },
+      minimal: { disabled: true },
+      low: { disabled: true },
+      Low: { reasoningEffort: "low" },
+      medium: { disabled: true },
+      high: { disabled: true },
+      max: { disabled: true },
+      Max: { reasoningEffort: "max" },
+      xhigh: { disabled: true },
+      "Extra High": { reasoningEffort: "xhigh" },
     })
+    expect(result.reasoning).toBe(true)
   })
 
-  test("does not synthesize variants from reasoning_options", () => {
+  test("keeps reasoning and disables raw keys so OpenCode's merge drops them", () => {
     const result = buildModel(
-      "gpt-5-codex",
+      "gpt-5.6-luna",
+      hit({
+        capabilities: { tools: true, input: ["text"], output: ["text"], reasoning: true } as ModelsDevModel["capabilities"],
+        variants: [
+          { id: "none", headers: {}, body: {} },
+          { id: "low", headers: {}, body: {} },
+          { id: "medium", headers: {}, body: {} },
+          { id: "high", headers: {}, body: {} },
+          { id: "xhigh", headers: {}, body: {} },
+          { id: "max", headers: {}, body: {} },
+        ],
+      }),
+      BASE_URL,
+    )
+    const generated: Record<string, Record<string, unknown>> = {
+      none: { reasoningEffort: "none" },
+      low: { reasoningEffort: "low" },
+      medium: { reasoningEffort: "medium" },
+      high: { reasoningEffort: "high" },
+      xhigh: { reasoningEffort: "xhigh" },
+      max: { reasoningEffort: "max" },
+    }
+    const merged = { ...generated, ...result.variants }
+    const visible = Object.fromEntries(Object.entries(merged).filter(([, value]) => value.disabled !== true))
+    expect(result.reasoning).toBe(true)
+    expect(Object.keys(visible)).toEqual(["None", "Low", "Medium", "High", "Extra High", "Max"])
+    expect(visible.none).toBeUndefined()
+    expect(visible.None).toEqual({ reasoningEffort: "none" })
+    expect(visible.xhigh).toBeUndefined()
+    expect(visible["Extra High"]).toEqual({ reasoningEffort: "xhigh" })
+  })
+
+  test("does not add Responses-only fields for unknown effort tokens", () => {
+    const result = buildModel(
+      "odd-effort",
+      hit({ variants: [{ id: "custom", headers: {}, body: {} }] }),
+      BASE_URL,
+      "@ai-sdk/openai",
+    )
+    expect(result.variants).toMatchObject({ custom: { reasoningEffort: "custom" } })
+    expect(result.variants?.custom).toEqual({ reasoningEffort: "custom" })
+  })
+
+  test("does not inspect non-API reasoning option fields", () => {
+    const result = buildModel(
+      "toggle-reasoner",
       hit({
         variants: [],
-        reasoning_options: [{ type: "effort", values: ["none", "low", "medium", "high", "xhigh", "max"] }],
+        reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }],
       } as Partial<ModelsDevModel>),
       BASE_URL,
     )
@@ -156,7 +218,7 @@ describe("buildModel", () => {
     expect(result.variants).toBeUndefined()
   })
 
-  test("copies explicit Catalog variants even when capability flags disagree", () => {
+  test("copies API variant IDs even when capability flags disagree", () => {
     const result = buildModel(
       "catalog-authoritative",
       hit({
@@ -165,10 +227,19 @@ describe("buildModel", () => {
       }),
       BASE_URL,
     )
-    expect(result.variants).toEqual({ high: { reasoningEffort: "high" } })
+    expect(result.variants).toMatchObject({
+      high: { disabled: true },
+      High: { reasoningEffort: "high" },
+    })
+    expect(result.reasoning).toBe(false)
   })
 
-  test("forwards Catalog request headers/options when present", () => {
+  test("omits catalog status unless it is alpha, beta, or deprecated", () => {
+    expect(buildModel("ok", hit({ status: "active" }), BASE_URL).status).toBeUndefined()
+    expect(buildModel("beta", hit({ status: "beta" }), BASE_URL).status).toBe("beta")
+  })
+
+  test("does not forward native-provider request headers or bodies", () => {
     const result = buildModel(
       "with-request",
       hit({
@@ -179,7 +250,7 @@ describe("buildModel", () => {
       }),
       BASE_URL,
     )
-    expect(result.headers).toEqual({ "X-Test": "1" })
-    expect(result.options).toEqual({ store: false })
+    expect(result.headers).toBeUndefined()
+    expect(result.options).toBeUndefined()
   })
 })
