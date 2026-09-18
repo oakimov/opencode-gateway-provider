@@ -405,3 +405,41 @@ describe("config hook", () => {
     }
   })
 })
+
+describe("chat.headers hook", () => {
+  test("adds LiteLLM's recognized session header for the litellm provider", async () => {
+    const hooks = await GatewayProvider(pluginInput())
+    const output = { headers: {} as Record<string, string> }
+
+    await hooks["chat.headers"]?.(
+      {
+        sessionID: "ses_test_session",
+        agent: "build",
+        model: { providerID: "litellm" },
+        provider: {},
+        message: {},
+      } as never,
+      output,
+    )
+
+    expect(output.headers).toEqual({ "x-litellm-session-id": "ses_test_session" })
+  })
+
+  test("does not add the LiteLLM header for another provider", async () => {
+    const hooks = await GatewayProvider(pluginInput())
+    const output = { headers: {} as Record<string, string> }
+
+    await hooks["chat.headers"]?.(
+      {
+        sessionID: "ses_test_session",
+        agent: "build",
+        model: { providerID: "ccr" },
+        provider: {},
+        message: {},
+      } as never,
+      output,
+    )
+
+    expect(output.headers).toEqual({})
+  })
+})

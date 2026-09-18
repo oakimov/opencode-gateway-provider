@@ -7,12 +7,24 @@ import { readFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-export type ModelsDevModel = Omit<ModelV2Info, "capabilities"> & {
+export type ModelsDevModel = {
+  id: string
+  providerID: string
+  family?: string
+  name: string
+  api: ModelV2Info["api"]
   capabilities: ModelV2Info["capabilities"] & {
     reasoning?: boolean
     temperature?: boolean
     attachment?: boolean
   }
+  request: ModelV2Info["request"]
+  variants: ModelV2Info["variants"]
+  time: { released: number }
+  cost: ModelV2Info["cost"]
+  status: ModelV2Info["status"]
+  enabled: boolean
+  limit: ModelV2Info["limit"]
   interleaved?: true | { field: string } | boolean
 }
 export type ModelsDevApi = ModelsDevModel[]

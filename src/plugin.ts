@@ -68,6 +68,7 @@ type ProviderConfig = {
 type GatewayConfig = Config & {
   provider?: Record<string, ProviderConfig | undefined>
 }
+type ChatHeadersHook = NonNullable<Hooks["chat.headers"]>
 
 function optionString(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined
@@ -140,6 +141,14 @@ function resolveApiKey(provider: ProviderConfig, options: ProviderOptions | unde
 export async function GatewayProvider(input: PluginInput, options?: GatewayPluginOptions): Promise<Hooks> {
   const scoped = options?.providers?.length ? [...options.providers] : undefined
   return {
+    async "chat.headers"(
+      request: Parameters<ChatHeadersHook>[0],
+      output: Parameters<ChatHeadersHook>[1],
+    ) {
+      if (request.model.providerID !== "litellm") return
+      // LiteLLM records this recognized header as the request's session/trace id.
+      output.headers["x-litellm-session-id"] = request.sessionID
+    },
     async config(cfg: Config) {
       const config = cfg as GatewayConfig
       config.provider ??= {}
